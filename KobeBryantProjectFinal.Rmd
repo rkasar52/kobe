@@ -1,0 +1,435 @@
+---
+title: "Insert Title"
+author: "Insert Author"
+date: "February 6, 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# devtools::install_github('thomasp85/gganimate')
+# devtools::install_github("thomasp85/transformr")
+library(dplyr)
+library(grid)
+library(jpeg)
+library(ggplot2)
+library(RCurl)
+library(ROCR)
+library(devtools)
+library(transformr)
+library(gganimate)
+library(pROC)
+library(plotROC)
+library(tweenr)
+library(forcats)
+library(scales)
+library(knitr)
+
+
+```
+
+```{r read in Data}
+kobe <- read.csv('Kobe.csv')
+```
+
+```{r creating binary variables }
+kobe <- mutate(kobe, shot.type = ifelse(shot_type== '2PT Field Goal', 0,1))
+
+# combined shot type 
+kobe <- mutate(kobe, jumpshot = ifelse(combined_shot_type== 'Jump Shot', 1,0))
+kobe <- mutate(kobe, Dunk = ifelse(combined_shot_type== 'Dunk', 1,0))
+kobe <- mutate(kobe, Layup = ifelse(combined_shot_type== 'Layup', 1,0))
+kobe <- mutate(kobe, Tip_Shot = ifelse(combined_shot_type== 'Tip Shot', 1,0))
+kobe <- mutate(kobe, Hook_Shot = ifelse(combined_shot_type== 'Hook Shot', 1,0))
+## if all zero shot type is bank shot
+
+# shot location
+kobe <- mutate(kobe, Mid_Range = ifelse(shot_zone_basic== 'Mid-Range', 1,0))
+kobe <- mutate(kobe, Restricted_area = ifelse(shot_zone_basic== 'Restricted Area', 1,0))
+kobe <- mutate(kobe, In_paint = ifelse(shot_zone_basic== 'In The Paint (Non-RA)', 1,0))
+kobe <- mutate(kobe, Above_Break3 = ifelse(shot_zone_basic== 'Above the Break 3 ', 1,0))
+kobe <- mutate(kobe, Right_corner3 = ifelse(shot_zone_basic== 'Right Corner 3', 1,0))
+kobe <- mutate(kobe, Backcourt = ifelse(shot_zone_basic== 'Backcourt', 1,0))
+## if all zeros then left corner 3.
+
+```
+
+
+```{r kobe.2}
+kobe$one <- rep(1, nrow(kobe))
+final.test <- kobe[is.na(kobe$shot_made_flag),]
+#5000 final test values
+kobe.2 <- kobe[!is.na(kobe$shot_made_flag),]
+#kobe.2 is used for heat charts
+#training set used for graphs and other obvs. 
+kobe.3 <- kobe.2 
+#kobe.3 is used to date stuff. 
+kobe.4 <- kobe.2
+#kobe.4 is used for Chris and Roman code
+
+kable(head(kobe.2))
+```
+
+```{r create train and test set}
+#create train and test set for predictions
+test.indicies = sample(1:nrow(kobe.2), 3000)
+kobe.test = kobe.2[test.indicies,]
+kobe.train = kobe.2[-test.indicies,]
+```
+
+```{r logisitic regression}
+# grab the appropriate columns
+log.kobe <- kobe.train[, c(10,11,12,14,15,16,25,26:37)]
+
+# fit the logistic regression
+glm.fit <- glm(shot_made_flag ~.,family=binomial,  data = log.kobe)
+
+# look at performance. 
+# Performance on training
+pred.train=predict(glm.fit, kobe.train, type='response')
+# Performance on Test
+pred.log.test =predict(glm.fit, kobe.test, type ='response')
+
+# AUC curve
+prediction.logreg <- prediction(pred.log.test, kobe.test$shot_made_flag)
+performance.logreg=performance(prediction.logreg, measure = 'tpr', x.measure = 'fpr') 
+str(performance.logreg)
+plot(performance.logreg, col='blue', lwd=3, main="ROC curve")
+abline(0,1)
+
+# Create a hard classificaiton
+predicted_shots <- ifelse(pred.log.test > 0.42, 1, 0)
+```
+
+```{r threshold optimization}
+# FPR
+fpr = performance(prediction.logreg, "fpr")@y.values[[1]]
+cutoff = performance(prediction.logreg, "fpr")@x.values[[1]]
+fnr = performance(prediction.logreg,"fnr")@y.values[[1]]
+matplot(cutoff, cbind(fpr,fnr), type="l",lwd=2, xlab="Threshold",ylab="Error Rate")
+```
+
+```{r Final Prediction}
+#impute the predictions into the original data (5000 missing) 
+final.pred <- predict(glm.fit, final.test, type ='response')
+predicted.shots <- ifelse(final.pred >0.42, 1, 0)
+predicted.shots<-as.data.frame(predicted.shots)
+final.test <- cbind(final.test, predicted.shots)
+final.test$shot.made <-NULL
+kobe.3$predicted.shots <- kobe.3$shot_made_flag
+kobe.final <- rbind(kobe.3, final.test)
+#kobe.final includes predicted shots, no dates. 
+```
+
+```{r getting image of court}
+#grabbing image of court to graph stuff in. 
+courtImg.URL <- "https://thedatagame.files.wordpress.com/2016/03/nba_court.jpg"
+court <- rasterGrob(readJPEG(getURLContent(courtImg.URL)),
+           width=unit(1,"npc"), height=unit(1,"npc"))
+#kobe$shot_made_flag <- as.factor(kobe$shot_made_flag)
+```
+
+
+
+```{r create percent for region}
+#Calculate percentage by shot zone area
+heat <- kobe.2 %>% 
+  group_by(season, shot_zone_range, shot_zone_area) %>%                            
+  summarise(percent = mean(shot_made_flag))
+
+#merge the percentage with data set. 
+kobe.2 <- merge(kobe.2,heat)
+
+#ggplot only takes factor so convert shot to factor
+kobe.2$shot_made_factor <- as.factor(kobe.2$shot_made_flag)
+```
+
+```{r heatmap}
+#plot heatmap on the court. Animate by season. 
+heatmap <- ggplot(kobe.2, aes(x=loc_x, y=loc_y, frame=season)) +
+      annotation_custom(court, -250, 250, -50, 420) +
+      geom_point(aes(colour = percent, shape = shot_made_factor)) +
+      xlim(-250, 250) +
+      ylim(-50, 420) +scale_color_gradientn(colours = c('black', 'blue', 'red', 'orange'), values= c(0,0.36,0.56, 1))+
+      labs(title = 'Season: {trunc(frame_time)}')+
+      transition_time(as.numeric(season))
+animate(heatmap)
+```
+
+
+
+```{r quarter percent}
+#calculate season percentage
+season.percent <- kobe.2 %>%
+  group_by(season,period)%>%
+  summarise(quarter_percent = mean(shot_made_flag))
+#merge the data frames
+kobe.2<-merge(kobe.2, season.percent)
+#plot and animate
+```
+
+```{r animated season percent}
+#plot season percentage animated.
+season.plot <- ggplot(kobe.2, aes(frame=season, x=period, y=quarter_percent, cumulative=TRUE))+geom_line()+ labs(title = 'Season: {frame_time}', x = 'Period', y = 'Percentage') +transition_time(as.numeric(season)) 
+
+animate(season.plot)
+```
+
+```{r date creation}
+#date <- read.csv('Date.csv', header=FALSE)
+library(lubridate)
+kobe.final$new <- mdy(kobe.final$game_date, tz="Asia/Kolkata")
+kobe.final$game_date <- NULL
+```
+
+```{r Season}
+#be careful of the space. 
+date.season <- read.csv('Regular Season.csv')
+date.season$new <- dmy(date.season[,2],tz="Asia/Kolkata")
+date.season <- date.season[,-c(1,2)]
+date.season$X <- NULL
+
+##kobe.season is the big data set that has dates, and predicted shots. 
+kobe.season <- merge(x=kobe.final, y=date.season, by='new')
+
+percentage <- kobe.season %>%
+  group_by(new) %>%
+  summarise(percentage = mean(shot_made_flag))
+```
+
+```{r Playoffs}
+#dont worry about this. 
+dates.playoffs <- read.csv('Playoffs.csv')
+dates.playoffs$Date <- (as.character(dates.playoffs$Date))
+#dates.playoffs$Leader <- NULL
+#dates.playoffs$Game<-NULL
+dates.playoffs$new <- mdy(dates.playoffs[,2], tz='Asia/Kolkata')
+```
+
+```{r Career Statistics}
+#1 is home game. 
+kobe.season$Home <- ifelse(kobe.season$Home == 'vs.', 1, 0)
+kobe.season$Win <- ifelse(kobe.season$Win == 'W', 1, 0)
+
+#Career Percentage. 
+Career_percentage <- mean(kobe.season$predicted.shots)
+class(kobe.season$predicted.shots)
+
+location_percentage <- kobe.season %>%
+  group_by(shot_zone_basic) %>%
+  summarise ((percentage = mean(predicted.shots)))
+
+three.point <- kobe.season %>%
+  group_by(shot_type) %>%
+  summarise (percentage= mean(predicted.shots))
+
+Total_Wins <- kobe.season %>%
+  group_by(new) %>%
+  summarise(temp = max(Win))%>%
+  summarise(Win_Total = sum(temp))
+
+Shooting <- kobe.season %>%
+  summarise(mean(predicted.shots))
+
+kable(Career_percentage)
+
+
+location_percentage
+three.point
+Total_Wins
+Shooting
+```
+
+```{r}
+win <- kobe.season %>%
+  group_by(new, opponent)%>%
+  summarise(temp=max(Win)) 
+  # summarise((Win_team = mean(temp)))
+
+win <- win %>%
+  group_by(opponent) %>%
+  summarise(Win_perct= mean(temp))%>%
+  mutate(opponent = fct_reorder(opponent, Win_perct))
+  
+win <- win[-c(2,32),]
+
+ggplot(win, aes(opponent, Win_perct, fill=opponent))+geom_col()+coord_flip()+theme(legend.position = 'none')+ scale_y_continuous(labels = percent_format())+labs(title= 'Winning Percentage by Team')+labs(y='Winning Percentage')
+```
+
+
+```{r shot type for home and away games}
+shot <- kobe.season %>%
+  group_by(combined_shot_type) %>%
+  summarise(Shot=sum(one))
+
+shot$Shot <- as.factor(shot$Shot)
+
+ggplot(shot, aes(x="", y= combined_shot_type, fill=Shot, colour=combined_shot_type))+geom_bar(stat='identity')+coord_polar('y')+ggtitle("Shot Type")+ theme(plot.title = element_text(size=22))
+```
+
+```{r}
+#Roman and Chris's code
+KobeSeason <- read.csv("kobe_season.csv")
+#kobe season is the one with the wins
+KobeSalaries <- read.csv("KobeSalaries.csv")
+colnames(KobeSalaries)[1] <- "season"
+KobeSalariesSeason <- merge(x = KobeSeason, y = KobeSalaries, by = "season", all.x = TRUE)
+
+# Creating Shot Percentages in various zones
+
+# shot.percent is new dataframe with shot percentage in each basic zone
+shot.percent <- kobe.2 %>%
+group_by(shot_zone_basic) %>%
+summarise(made = sum(shot_made_flag), taken = sum(one))
+shot.percent$percent <- shot.percent$made/shot.percent$taken
+# sp.detailed is a new dataframe with shot percentage in each zone area
+sp.detailed <- kobe.2 %>%
+group_by(shot_zone_area) %>%
+summarise(made = sum(shot_made_flag), taken = sum(one))
+sp.detailed$percent <- sp.detailed$made/sp.detailed$taken
+
+# Grouping shots made and shots taken by season and including mean salary
+salary.per.shot <- KobeSalariesSeason %>%
+group_by(season) %>%
+  summarise(made = sum(shot_made_flag), taken = sum(one), salary = mean(Salary))
+shot.percent$percent <- shot.percent$made/shot.percent$taken
+# Creating columns for Salary per basket and per shot
+salary.per.shot$per.basket <- salary.per.shot$salary / salary.per.shot$made
+salary.per.shot$per.shot <- salary.per.shot$salary / salary.per.shot$taken
+# Creating new column "year" that will allow for chronological graphs
+salary.per.shot$season <- as.character(salary.per.shot$season)
+salary.per.shot$year <- salary.per.shot$season
+salary.per.shot$year <- as.numeric(substr(salary.per.shot$year, 1, 4)) + 1
+salary.per.shot$season_number <- seq(1,20,1) 
+
+# Plotting Salary Per Basket over time
+# Red shading indicates season in which kobe sustained an injury and played only a few games
+BasketMoneyPlot <- ggplot(salary.per.shot, aes(x = year, y = per.basket)) +
+  geom_point() +
+  ylim(0, 120000) +
+  geom_line() +
+  geom_rect(xmin = 2013, ymin = -100, xmax = 2015, ymax = 130000,
+            
+            fill="red",alpha=0.01)
+
+# Generating Plot
+BasketMoneyPlot
+
+# Plotting Salary per shot over time
+ShotMoneyPlot <- ggplot(salary.per.shot, aes(x = year, y = per.shot)) +
+  geom_point() +
+  ylim(0, 120000) +
+  geom_line() +
+  geom_rect(xmin = 2013, ymin = -100, xmax = 2015, ymax = 130000,
+            
+            fill="red",alpha=0.01)
+
+ShotMoneyPlot
+
+# Plotting Salary per shot (purple) and salary per basket (yellow) over time
+BothPlots <- ggplot(salary.per.shot, aes(x = year)) +
+  ylim(0, 110000) +
+  geom_point(y = salary.per.shot$per.basket , colour = "yellow") +
+  geom_point(y = salary.per.shot$per.shot, colour = "purple") +
+  geom_line(y = salary.per.shot$per.basket, colour = "yellow") +
+  geom_line(y = salary.per.shot$per.shot, colour = "purple") +
+  geom_rect(xmin = 2013, ymin = -100, xmax = 2015, ymax = 130000,
+            
+            fill="red",alpha=0.01)
+
+BothPlots 
+
+
+
+library(dplyr)
+# Creating new dataframe of shooting percentage when winning and losing in each season
+shooting.win <- KobeSeason %>%
+  group_by(new, Win, season) %>%
+  summarise(made = sum(predicted.shots), taken = sum(one))
+shooting.win$percent <- shooting.win$made/shooting.win$taken
+shooting.win$win_dummy <- ifelse(shooting.win$Win == "W", 1, 0)
+# Creating new dataframe of average and aggregate shooting percentage for win and loss each season
+season.win <- shooting.win %>%
+  group_by(season, Win) %>%
+  summarise(make = sum(made), take = sum(taken),
+            avg_game_percentage = mean(percent))
+
+season.win$season_percent <- season.win$make/season.win$take
+# Creating a new dataframe of total number of wins per season
+season.win.count <- shooting.win %>%
+  group_by(season) %>%
+  summarise(wins = sum(win_dummy)) 
+
+
+
+# Histogram of Shooting percentage when winning and losing in each season
+season.win_chart <- season.win %>% ggplot(aes(season, avg_game_percentage, fill = Win)) +
+  geom_col(position = "dodge")
+season.win_chart
+
+
+
+
+
+#predict average shooting percentage against each team across entire career
+kobe.2 %>% 
+  filter(!is.na(shot_made_flag)) %>%
+  group_by(opponent) %>% 
+  summarize(pct = sum(shot_made_flag)/sum(one)) %>%
+  mutate(opponent = fct_reorder(opponent, pct)) %>%
+  ggplot(aes(opponent, pct, fill = opponent)) + 
+  geom_col()+ 
+  coord_flip()+ 
+  theme(legend.position= 'none')+ 
+  scale_y_continuous(labels = percent_format())+ 
+  labs(x="")
+```
+
+```{r}
+# heat is new dataframe with shot percentage at each distance in each zone
+kobe <- kobe.4
+heat <- kobe %>%
+group_by(shot_zone_area, shot_zone_range) %>%
+summarise(made = sum(shot_made_flag), taken = sum(one))
+heat$percent <- heat$made/heat$taken
+
+# Creating new dataframe kobe.factor where shot_made_flag is a factor
+kobe$zone_and_range <- kobe$shot_zone_area:kobe$shot_zone_range
+heat$zone_and_range <- heat$shot_zone_area:heat$shot_zone_range
+kobe.factor <- kobe
+kobe.factor$shot_made_flag <- as.factor(kobe.factor$shot_made_flag)
+# Creating New Dataframe map by merging kobe.factor and shot.percent
+#map <- merge(x = kobe.factor, y = heat, by = percent, all.x = TRUE)
+map.zone <- merge(x = kobe.factor, y = heat, by = "shot_zone_area", all.x = TRUE)
+map.range <- merge(x = kobe.factor, y = heat, by = "shot_zone_range", all.x = TRUE)
+map.zone.range <- merge(x = kobe.factor, y = heat, by = "zone_and_range", all.x = TRUE)
+# Currently gives same percentage for entire area: want area and range
+# plot using NBA court background and colour by shot zone
+zonemap <- ggplot(kobe.factor, aes(x=loc_x, y=loc_y)) +
+annotation_custom(court, -250, 250, -50, 420) +
+geom_point(aes(colour = shot_zone_area, shape = shot_made_flag)) +
+xlim(-250, 250) +
+ylim(-50, 420)
+# plot using NBA court background and colour by shot zone and distance
+zone_map_distance <- ggplot(kobe.factor, aes(x=loc_x, y=loc_y)) +
+annotation_custom(court, -250, 250, -50, 420) +
+geom_point(aes(colour = shot_zone_area:shot_zone_range, shape = shot_made_flag)) +
+xlim(-250, 250) +
+ylim(-50, 420)
+# plot using NBA court background and colour by zone and percentage
+
+zone_percent <- ggplot(map.zone, aes(x=loc_x, y=loc_y)) +
+annotation_custom(court, -250, 250, -50, 420) +
+geom_point(aes(colour = percent, shape = shot_made_flag)) +
+xlim(-250, 250) +
+ylim(-50, 420) + scale_color_gradientn(colours = rainbow(8))
+
+zonemap
+zone_map_distance
+zone_percent
+```
+
+
+$MSE= E[(\hat x -x)^2]$
+
+$log(odds) = \beta +\beta*Distance +\alpha* (Shot Type) + \gamma * (Game Fixed Effects) +\sigma*(Season Fixed Effects) $
